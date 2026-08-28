@@ -45,7 +45,11 @@ func (m *model) View() string {
 		b.WriteString(p.Warn.Render("  several models served here; metadata withheld to avoid mismatching") + "\n")
 	}
 	if !m.snap.HasMetrics {
-		b.WriteString(p.Warn.Render("  no throughput data; restart llama-server with --metrics") + "\n")
+		hint := "restart llama-server with --metrics"
+		if m.snap.Props.EngineOr().DisplayName() == "sglang" {
+			hint = "start SGLang with --enable-metrics"
+		}
+		b.WriteString(p.Warn.Render("  no throughput data; "+hint) + "\n")
 	}
 
 	b.WriteString(m.resourceView())
@@ -112,12 +116,16 @@ func (m *model) headerView() string {
 	head := p.Head.Render(title + strings.Repeat(" ", gap) + status)
 
 	// Context sizes are configuration values, so they are shown exactly as
-	// passed to -c rather than rounded, where 262144 would read as 262.1k.
-	sub := fmt.Sprintf("  %s   ctx %d/%d   llama.cpp %s   up %s   scrape %s",
+	// configured rather than rounded, where 262144 would read as 262.1k.
+	build := s.Props.BuildInfo
+	if build == "" {
+		build = s.Props.EngineOr().DisplayName()
+	}
+	sub := fmt.Sprintf("  %s   ctx %d/%d   %s   up %s   scrape %s",
 		m.collector.Endpoint(),
 		s.Model.Meta.NCtx,
 		s.Model.Meta.NCtxTrain,
-		orDash(s.Props.BuildInfo),
+		orDash(build),
 		format.Duration(m.collector.Uptime()),
 		s.ScrapeR.Round(time.Millisecond),
 	)
@@ -220,7 +228,12 @@ func (m *model) throughputView() string {
 	if s.DecodeStepsPerSec <= 0 {
 		liveStyle = p.Muted
 	}
-	live := fmt.Sprintf("%7.1f steps/s", s.DecodeStepsPerSec)
+	liveUnit := "steps/s"
+	if s.Props.EngineOr().DisplayName() == "sglang" {
+		// SGLang maps realtime decode tokens onto DecodeStepsPerSec.
+		liveUnit = "tok/s"
+	}
+	live := fmt.Sprintf("%7.1f %s", s.DecodeStepsPerSec, liveUnit)
 	b.WriteString("  " + row(p, "DECODE", labelCol,
 		liveStyle.Render(live)+"  "+sparkline(p, m.collector.StepHist.Values(), sparkW)) + "\n")
 
@@ -232,8 +245,14 @@ func (m *model) throughputView() string {
 		measuredLabel(p, s.PrefillTokensPerSec, s.PrefillAge, s.HasPrefillMeasured)+
 			p.Muted.Render(fmt.Sprintf("   lifetime %s", format.Rate(s.Raw.LifetimePromptTokensPerSec())))) + "\n")
 
-	queue := fmt.Sprintf("%.0f processing   %.0f deferred   %.2f slots/decode",
-		s.Raw.RequestsProcessing, s.Raw.RequestsDeferred, s.Raw.BusySlotsPerDecode)
+	var queue string
+	if s.Props.EngineOr().DisplayName() == "sglang" {
+		queue = fmt.Sprintf("%.0f running   %.0f queued",
+			s.Raw.RequestsProcessing, s.Raw.RequestsDeferred)
+	} else {
+		queue = fmt.Sprintf("%.0f processing   %.0f deferred   %.2f slots/decode",
+			s.Raw.RequestsProcessing, s.Raw.RequestsDeferred, s.Raw.BusySlotsPerDecode)
+	}
 	b.WriteString("  " + row(p, "QUEUE", labelCol, p.Value.Render(queue)) + "\n")
 	return b.String()
 }
@@ -267,6 +286,13 @@ func (m *model) qualityView() string {
 
 	ctxLabel := fmt.Sprintf("%5.1f%%  longest seen %s tok",
 		s.ContextPressure*100, format.Count(s.Raw.TokensMax))
+	if s.Props.EngineOr().DisplayName() == "sglang" {
+		ctxLabel = fmt.Sprintf("%5.1f%%  KV pool occupancy", s.ContextPressure*100)
+		if s.Raw.TokensMax > 0 {
+			ctxLabel = fmt.Sprintf("%5.1f%%  %s tok in decode",
+				s.ContextPressure*100, format.Count(s.Raw.TokensMax))
+		}
+	}
 	b.WriteString("  " + row(p, "CONTEXT", labelCol, gauge(p, s.ContextPressure, w, ctxLabel)) + "\n")
 	return b.String()
 }
@@ -301,7 +327,11 @@ func (m *model) slotsView() string {
 	s := m.snap
 
 	if len(s.Slots) == 0 {
-		return "  " + p.Muted.Render("no slot detail; start llama-server with --slots") + "\n"
+		msg := "no slot detail; start llama-server with --slots"
+		if s.Props.EngineOr().DisplayName() == "sglang" {
+			msg = "SGLang has no slot table; queue depth is in QUEUE above"
+		}
+		return "  " + p.Muted.Render(msg) + "\n"
 	}
 
 	barW := 14
@@ -402,7 +432,7 @@ func (m *model) footerView() string {
 func (m *model) helpView() string {
 	p := m.palette
 	lines := []string{
-		p.Title.Render("ltop — activity monitor for llama.cpp"),
+		p.Title.Render("ltop — activity monitor for llama.cpp / SGLang"),
 		"",
 		p.Label.Render("KEYS"),
 		"  q / esc      quit",

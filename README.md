@@ -1,6 +1,6 @@
 # ltop
 
-**An htop for llama.cpp.** A terminal activity monitor that shows what your local LLM server is actually doing — live throughput, KV cache efficiency, speculative decoding quality, GPU load, and per-slot context usage, all on one screen.
+**An htop for llama.cpp and SGLang.** A terminal activity monitor that shows what your local LLM server is actually doing — live throughput, KV cache efficiency, speculative decoding quality, GPU load, and per-slot context usage, all on one screen.
 
 [![CI](https://github.com/pefman/ltop/actions/workflows/ci.yml/badge.svg)](https://github.com/pefman/ltop/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/pefman/ltop)](https://github.com/pefman/ltop/releases/latest)
@@ -47,7 +47,9 @@ It also surfaces things nothing else does — like per-position speculative draf
 ## Requirements
 
 - Linux (ltop reads `/proc` and `/sys` directly)
-- A [llama.cpp](https://github.com/ggml-org/llama.cpp) server
+- A [llama.cpp](https://github.com/ggml-org/llama.cpp) **or** [SGLang](https://github.com/sgl-project/sglang) server
+
+### llama.cpp
 
 Start `llama-server` with introspection enabled:
 
@@ -56,6 +58,16 @@ llama-server -m model.gguf --slots --metrics
 ```
 
 Both flags are optional. Without `--metrics` you lose the throughput, cache and speculative panels; without `--slots` you lose the slot table. ltop stays online either way and tells you which flag is missing.
+
+### SGLang
+
+Expose Prometheus metrics (default port is often `30000` or `8000`):
+
+```bash
+python -m sglang.launch_server --model-path <model> --enable-metrics --port 8000
+```
+
+ltop autodetects SGLang from `sglang:` metric names and `/get_server_info`. There is no slot table; queue depth and KV pool occupancy replace it.
 
 GPU panels use `nvidia-smi` for NVIDIA and the `amdgpu` sysfs interface for AMD. Neither is required — the panel hides itself when no GPU is readable.
 
@@ -92,10 +104,18 @@ go install github.com/pefman/ltop@latest
 ltop                # the dashboard
 ltop -once          # one plain-text snapshot, then exit
 ltop -reconfigure   # pick a different server
+ltop -config path   # use a different config file (and its endpoint/host)
 ltop -version
 ```
 
-On first run ltop scans localhost for llama.cpp servers, asks which to monitor, and saves your choice to `~/.config/ltop/config.json`. Servers started with `--api-key` are supported; ltop asks for the key only when the server actually demands one.
+On first run ltop scans localhost for llama.cpp and SGLang servers, asks which to monitor, and saves your choice to `~/.config/ltop/config.json`. Servers started with `--api-key` are supported; ltop asks for the key only when the server actually demands one.
+
+Use `-config` when you want a separate saved endpoint — for example a remote host — without overwriting the default config:
+
+```bash
+ltop -config ~/.config/ltop/remote.json -reconfigure   # pick/save a remote endpoint
+ltop -config ~/.config/ltop/remote.json                # monitor that host
+```
 
 `ltop -once` prints plain text, so it pipes and greps cleanly:
 
@@ -148,7 +168,7 @@ ltop -once | grep 'hit rate'
 }
 ```
 
-The endpoint is not read from the environment. Run `ltop -reconfigure` to change it.
+The endpoint is not read from the environment. Run `ltop -reconfigure` to change it, or pass `-config path` to load and save a different config file.
 `c`/`C` and `w`/`W` write `currency` and `kwh_price` so the last tariff is reused next time.
 
 ## Measuring a single run

@@ -52,6 +52,55 @@ func (s Set) ValueOr(name string, def float64) float64 {
 	return def
 }
 
+// Sum returns the total of every series under name, including labeled ones.
+// Engines such as SGLang export only labeled counters, so scalar Value is
+// useless there.
+func (s Set) Sum(name string) float64 {
+	var total float64
+	for _, sample := range s.Samples(name) {
+		if math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) {
+			continue
+		}
+		total += sample.Value
+	}
+	return total
+}
+
+// SumMatching returns the total of series under name whose labels contain
+// every key/value pair in match. An empty match sums every series.
+func (s Set) SumMatching(name string, match map[string]string) float64 {
+	var total float64
+	for _, sample := range s.Samples(name) {
+		if !labelsMatch(sample.Labels, match) {
+			continue
+		}
+		if math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) {
+			continue
+		}
+		total += sample.Value
+	}
+	return total
+}
+
+// HasPrefix reports whether any metric name in the set starts with prefix.
+func (s Set) HasPrefix(prefix string) bool {
+	for name := range s {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func labelsMatch(labels, match map[string]string) bool {
+	for k, v := range match {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // Samples returns every series recorded under name.
 func (s Set) Samples(name string) []Sample {
 	if f, ok := s[name]; ok {

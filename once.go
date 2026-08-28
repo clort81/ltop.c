@@ -50,11 +50,22 @@ func printSnapshot(out io.Writer, cfg config.Config, s collect.Snapshot) {
 
 	section(out, "server")
 	kv(out, "endpoint", cfg.Endpoint)
-	kv(out, "llama.cpp build", p.BuildInfo)
+	kv(out, "engine", p.EngineOr().DisplayName())
+	kv(out, "build", p.BuildInfo)
 	kv(out, "scrape", s.ScrapeR.Round(time.Microsecond).String())
 	kv(out, "sleeping", fmt.Sprint(p.IsSleeping))
-	kv(out, "metrics", available(s.HasMetrics, "start llama-server with --metrics"))
-	kv(out, "slots", available(s.HasSlots, "start llama-server with --slots"))
+	metricsHint := "start llama-server with --metrics"
+	slotsHint := "start llama-server with --slots"
+	if p.EngineOr().DisplayName() == "sglang" {
+		metricsHint = "start SGLang with --enable-metrics"
+		slotsHint = "not applicable on SGLang"
+	}
+	kv(out, "metrics", available(s.HasMetrics, metricsHint))
+	if p.EngineOr().DisplayName() == "sglang" {
+		kv(out, "slots", "n/a")
+	} else {
+		kv(out, "slots", available(s.HasSlots, slotsHint))
+	}
 	if s.Loading {
 		kv(out, "state", "loading model")
 	}
@@ -106,9 +117,14 @@ func printSnapshot(out io.Writer, cfg config.Config, s collect.Snapshot) {
 	kv(out, "longest sequence", format.Count(m.TokensMax)+" tok")
 
 	section(out, "queue")
-	kv(out, "processing", fmt.Sprintf("%.0f", m.RequestsProcessing))
-	kv(out, "deferred", fmt.Sprintf("%.0f", m.RequestsDeferred))
-	kv(out, "busy slots per decode", fmt.Sprintf("%.2f", m.BusySlotsPerDecode))
+	if p.EngineOr().DisplayName() == "sglang" {
+		kv(out, "running", fmt.Sprintf("%.0f", m.RequestsProcessing))
+		kv(out, "queued", fmt.Sprintf("%.0f", m.RequestsDeferred))
+	} else {
+		kv(out, "processing", fmt.Sprintf("%.0f", m.RequestsProcessing))
+		kv(out, "deferred", fmt.Sprintf("%.0f", m.RequestsDeferred))
+		kv(out, "busy slots per decode", fmt.Sprintf("%.2f", m.BusySlotsPerDecode))
+	}
 	kv(out, "context pressure", format.Percent(s.ContextPressure))
 
 	if m.SpecEnabled() {

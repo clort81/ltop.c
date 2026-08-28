@@ -1,5 +1,7 @@
-// Package llama is a read-only client for a llama.cpp server's native
-// telemetry endpoints.
+// Package llama is a read-only client for local LLM server telemetry.
+//
+// It started as a llama.cpp client; SGLang is supported through the same
+// HTTP helpers plus engine-specific parsers for /metrics and /get_server_info.
 package llama
 
 import (
@@ -136,6 +138,8 @@ func getJSON[T any](ctx context.Context, c *Client, path string) (T, error) {
 
 // Health queries /health. A 503 means the server is up but still loading a
 // model, which is reported as a state rather than an error.
+//
+// SGLang often returns an empty 200 body; that is treated as healthy.
 func (c *Client) Health(ctx context.Context) (Health, error) {
 	body, status, err := c.doGet(ctx, "/health")
 	if err != nil {
@@ -147,16 +151,85 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 	if err := statusError("/health", status); err != nil {
 		return Health{}, err
 	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" || trimmed == "OK" || trimmed == "ok" {
+		return Health{Status: "ok"}, nil
+	}
 	var h Health
 	if err := json.Unmarshal(body, &h); err != nil {
-		return Health{}, fmt.Errorf("/health: %w", err)
+		// Non-JSON 200 responses from alternate engines still mean reachable.
+		return Health{Status: "ok"}, nil
+	}
+	if h.Status == "" {
+		h.Status = "ok"
 	}
 	return h, nil
 }
 
 // Props queries /props for model and server configuration.
 func (c *Client) Props(ctx context.Context) (Props, error) {
-	return getJSON[Props](ctx, c, "/props")
+	p, err := getJSON[Props](ctx, c, "/props")
+	if err != nil {
+		return Props{}, err
+	}
+	if p.Engine == EngineUnknown {
+		p.Engine = EngineLlama
+	}
+	return p, nil
+}
+
+// ServerInfo queries SGLang's /get_server_info, falling back to /server_info.
+func (c *Client) ServerInfo(ctx context.Context) (ServerInfo, error) {
+	body, err := c.get(ctx, "/get_server_info")
+	if err != nil {
+		if !errors.Is(err, ErrEndpointDisabled) {
+			return ServerInfo{}, err
+		}
+		body, err = c.get(ctx, "/server_info")
+		if err != nil {
+			return ServerInfo{}, err
+		}
+	}
+	info, err := DecodeServerInfo(body)
+	if err != nil {
+		return ServerInfo{}, fmt.Errorf("/get_server_info: %w", err)
+	}
+	return info, nil
+}
+
+// Identify probes the endpoint and returns props for either llama.cpp or
+// SGLang. llama.cpp is recognised by /props; SGLang by /get_server_info or
+// an sglang-prefixed /metrics scrape.
+func (c *Client) Identify(ctx context.Context) (Props, error) {
+	if props, err := c.Props(ctx); err == nil && props.ModelPath != "" {
+		return props, nil
+	} else if err != nil && errors.Is(err, ErrUnauthorized) {
+		return Props{}, err
+	}
+
+	if info, err := c.ServerInfo(ctx); err == nil && (info.ModelPath != "" || info.ServedModelName != "") {
+		return PropsFromServerInfo(info), nil
+	} else if err != nil && errors.Is(err, ErrUnauthorized) {
+		return Props{}, err
+	}
+
+	set, err := c.Metrics(ctx)
+	if err != nil {
+		return Props{}, err
+	}
+	switch DetectEngine(set) {
+	case EngineSGLang:
+		p := Props{Engine: EngineSGLang, EndpointMetrics: true, BuildInfo: "sglang"}
+		if n := SGLangContextLen(set); n > 0 {
+			// Model path may still be filled by a later ServerInfo refresh.
+			_ = n
+		}
+		return p, nil
+	case EngineLlama:
+		return Props{Engine: EngineLlama, EndpointMetrics: true}, nil
+	default:
+		return Props{}, fmt.Errorf("%w: /props", ErrEndpointDisabled)
+	}
 }
 
 // Slots queries /slots. It returns ErrEndpointDisabled when the server was

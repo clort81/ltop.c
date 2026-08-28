@@ -38,8 +38,22 @@ func (c Config) PollInterval() time.Duration {
 	}
 }
 
-// Path returns the config file location, honouring XDG_CONFIG_HOME.
+// fileOverride, when non-empty, is used by Path/Load/Save instead of the
+// XDG default. Set via SetFile from the -config flag.
+var fileOverride string
+
+// SetFile makes Load, Save, and Path use path instead of ~/.config/ltop/config.json.
+// An empty path restores the default. Call before Load or Save.
+func SetFile(path string) {
+	fileOverride = path
+}
+
+// Path returns the config file location. With no -config override it honours
+// XDG_CONFIG_HOME; otherwise it returns the path passed to SetFile.
 func Path() (string, error) {
+	if fileOverride != "" {
+		return filepath.Clean(fileOverride), nil
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err

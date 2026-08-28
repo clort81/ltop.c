@@ -14,11 +14,11 @@ import (
 	"github.com/pefman/ltop/internal/llama"
 )
 
-// Setup runs the first-run wizard: it scans localhost, presents any llama.cpp
+// Setup runs the first-run wizard: it scans localhost, presents any supported
 // servers it found, and persists the chosen endpoint.
 func Setup(ctx context.Context, in io.Reader, out io.Writer) (Config, error) {
 	fmt.Fprintln(out, "ltop setup")
-	fmt.Fprintln(out, "Scanning localhost for llama.cpp servers...")
+	fmt.Fprintln(out, "Scanning localhost for llama.cpp / SGLang servers...")
 
 	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -30,13 +30,13 @@ func Setup(ctx context.Context, in io.Reader, out io.Writer) (Config, error) {
 			fmt.Fprintln(out, "      requires an API key")
 			continue
 		}
-		fmt.Fprintf(out, "      model %s", orDash(f.Model))
+		fmt.Fprintf(out, "      %s  model %s", f.Engine.DisplayName(), orDash(f.Model))
 		if f.Build != "" {
 			fmt.Fprintf(out, "  build %s", f.Build)
 		}
 		fmt.Fprintln(out)
-		if !f.HasSlots || !f.HasMetric {
-			fmt.Fprintf(out, "      note: %s\n", missingNote(f))
+		if note := missingNote(f); note != "" {
+			fmt.Fprintf(out, "      note: %s\n", note)
 		}
 	}
 	if len(found) == 0 {
@@ -128,13 +128,21 @@ func prompt(reader *bufio.Reader, out io.Writer, found []discover.Found) (string
 }
 
 func missingNote(f discover.Found) string {
+	if f.Engine.Is(llama.EngineSGLang) {
+		if !f.HasMetric {
+			return "SGLang metrics unavailable; start the server with --enable-metrics"
+		}
+		return ""
+	}
 	switch {
 	case !f.HasSlots && !f.HasMetric:
 		return "server started without --slots and --metrics; ltop will show little"
 	case !f.HasSlots:
 		return "slot detail unavailable; restart the server with --slots"
-	default:
+	case !f.HasMetric:
 		return "metrics unavailable; restart the server with --metrics"
+	default:
+		return ""
 	}
 }
 

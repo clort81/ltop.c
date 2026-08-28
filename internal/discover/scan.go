@@ -1,4 +1,4 @@
-// Package discover finds llama.cpp servers listening on the local machine.
+// Package discover finds local LLM servers listening on the machine.
 package discover
 
 import (
@@ -13,14 +13,15 @@ import (
 	"github.com/pefman/ltop/internal/llama"
 )
 
-// CandidatePorts are the ports llama.cpp and its common wrappers listen on.
+// CandidatePorts are the ports llama.cpp, SGLang, and common wrappers listen on.
 // 11434 is included because Ollama squats there and must be identified so it
 // can be rejected rather than silently monitored.
-var CandidatePorts = []int{11436, 8080, 8000, 8081, 8090, 1234, 5000, 11434}
+var CandidatePorts = []int{11436, 8080, 8000, 8081, 8090, 1234, 5000, 30000, 11434}
 
-// Found describes a reachable llama.cpp server.
+// Found describes a reachable inference server that ltop can monitor.
 type Found struct {
 	Endpoint  string
+	Engine    llama.Engine
 	Model     string
 	Build     string
 	HasSlots  bool
@@ -29,9 +30,9 @@ type Found struct {
 	NeedsAuth bool
 }
 
-// Scan probes localhost for llama.cpp servers. Ports are dialled concurrently
-// and only endpoints answering /props are reported, which excludes Ollama and
-// other OpenAI-compatible servers that ltop cannot read telemetry from.
+// Scan probes localhost for llama.cpp and SGLang servers. Ports are dialled
+// concurrently; only endpoints that identify as a supported engine are
+// reported, which excludes Ollama and other OpenAI-only servers.
 func Scan(ctx context.Context, ports []int) []Found {
 	if len(ports) == 0 {
 		ports = CandidatePorts
@@ -76,25 +77,36 @@ func probe(ctx context.Context, port int) (Found, bool) {
 	endpoint := "http://" + addr
 	c := llama.New(endpoint, "")
 
-	propsCtx, cancelProps := context.WithTimeout(ctx, 2*time.Second)
-	defer cancelProps()
-	props, err := c.Props(propsCtx)
+	idCtx, cancelID := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelID()
+	props, err := c.Identify(idCtx)
 	if err != nil {
-		// A server behind --api-key still identifies itself as worth offering.
 		if errors.Is(err, llama.ErrUnauthorized) {
 			return Found{Endpoint: endpoint, NeedsAuth: true}, true
 		}
 		return Found{}, false
 	}
-	if props.ModelPath == "" {
+	if props.ModelPath == "" && props.Engine == llama.EngineUnknown {
 		return Found{}, false
+	}
+	// Metrics-only SGLang identification may lack a model path; still offer it.
+	if props.ModelPath == "" && !props.Engine.Is(llama.EngineSGLang) {
+		return Found{}, false
+	}
+
+	hasMetric := props.EndpointMetrics
+	if props.Engine.Is(llama.EngineSGLang) && !hasMetric {
+		// SGLang's enable_metrics flag may be absent from older info payloads;
+		// a successful Identify via /metrics already proved telemetry exists.
+		hasMetric = true
 	}
 
 	return Found{
 		Endpoint:  endpoint,
+		Engine:    props.EngineOr(),
 		Model:     props.ModelName(),
 		Build:     props.BuildInfo,
 		HasSlots:  props.EndpointSlots,
-		HasMetric: props.EndpointMetrics,
+		HasMetric: hasMetric,
 	}, true
 }

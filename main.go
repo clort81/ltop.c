@@ -1,4 +1,4 @@
-// Command ltop is a terminal activity monitor for llama.cpp servers.
+// Command ltop is a terminal activity monitor for llama.cpp and SGLang servers.
 package main
 
 import (
@@ -19,6 +19,7 @@ import (
 func main() {
 	once := flag.Bool("once", false, "print a single plain-text snapshot and exit")
 	reconfigure := flag.Bool("reconfigure", false, "re-run endpoint discovery and save a new endpoint")
+	configPath := flag.String("config", "", "path to config file (default: ~/.config/ltop/config.json)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Usage = usage
 	flag.Parse()
@@ -31,6 +32,10 @@ func main() {
 	if runtime.GOOS != "linux" {
 		fmt.Fprintln(os.Stderr, "ltop: Linux only")
 		os.Exit(1)
+	}
+
+	if *configPath != "" {
+		config.SetFile(*configPath)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -70,17 +75,19 @@ func loadOrSetup(ctx context.Context, reconfigure bool) (config.Config, error) {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `ltop - activity monitor for llama.cpp servers
+	fmt.Fprint(os.Stderr, `ltop - activity monitor for llama.cpp / SGLang servers
 
 Usage:
   ltop [flags]
 
 Flags:
-  -once          print a single plain-text snapshot and exit
-  -reconfigure   re-run endpoint discovery and save a new endpoint
-  -version       print the version and exit
+  -once            print a single plain-text snapshot and exit
+  -reconfigure     re-run endpoint discovery and save a new endpoint
+  -config path     use a different config file (and its endpoint/host)
+  -version         print the version and exit
 
 The endpoint is discovered on first run and stored in the config file; it is
-not read from the environment.
+not read from the environment. Pass -config to keep a separate endpoint (for
+example a remote host) without changing the default config.
 `)
 }

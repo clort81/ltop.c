@@ -1,4 +1,4 @@
-// Package collect polls a llama.cpp server and derives live rates from its
+// Package collect polls a local LLM server and derives live rates from its
 // monotonic counters.
 package collect
 

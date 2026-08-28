@@ -124,6 +124,31 @@ func TestValueOrMissing(t *testing.T) {
 	}
 }
 
+func TestSumLabeled(t *testing.T) {
+	doc := `
+sglang:prompt_tokens_total{is_streaming="false",model_name="m"} 10
+sglang:prompt_tokens_total{is_streaming="true",model_name="m"} 20
+sglang:realtime_tokens_total{mode="decode",model_name="m"} 5
+sglang:realtime_tokens_total{mode="prefill_compute",model_name="m"} 7
+`
+	set, err := Parse(strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := set.Sum("sglang:prompt_tokens_total"); got != 30 {
+		t.Errorf("Sum = %v, want 30", got)
+	}
+	if got := set.SumMatching("sglang:realtime_tokens_total", map[string]string{"mode": "decode"}); got != 5 {
+		t.Errorf("SumMatching decode = %v, want 5", got)
+	}
+	if !set.HasPrefix("sglang:") {
+		t.Error("HasPrefix(sglang:) = false")
+	}
+	if set.HasPrefix("llamacpp:") {
+		t.Error("HasPrefix(llamacpp:) = true")
+	}
+}
+
 func mustFixture(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile("testdata/metrics.txt")

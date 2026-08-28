@@ -146,3 +146,43 @@ func TestSetupAcceptsTypedURL(t *testing.T) {
 		t.Errorf("saved endpoint = %q, want %q", saved.Endpoint, cfg.Endpoint)
 	}
 }
+
+func TestSetFileOverridesDefaultPath(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "alt", "remote.json")
+	SetFile(custom)
+	t.Cleanup(func() { SetFile("") })
+
+	path, err := Path()
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if path != custom {
+		t.Fatalf("Path = %q, want %q", path, custom)
+	}
+
+	want := Config{
+		Endpoint:       "http://remote.example:8080",
+		PollIntervalMS: 1000,
+	}
+	if err := Save(want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(custom); err != nil {
+		t.Fatalf("custom config missing: %v", err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Endpoint != want.Endpoint {
+		t.Errorf("Endpoint = %q, want %q", got.Endpoint, want.Endpoint)
+	}
+
+	// Default XDG config must stay untouched.
+	SetFile("")
+	if _, err := Load(); !errors.Is(err, ErrNotFound) {
+		t.Errorf("default Load = %v, want ErrNotFound", err)
+	}
+}

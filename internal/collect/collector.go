@@ -10,16 +10,17 @@ import (
 	"github.com/pefman/ltop/internal/gpu"
 	"github.com/pefman/ltop/internal/host"
 	"github.com/pefman/ltop/internal/llama"
+	"github.com/pefman/ltop/internal/promparse"
 )
 
-// propsInterval limits how often /props is re-read; it is static apart from
-// model swaps and sleep transitions.
+// propsInterval limits how often /props (or SGLang /get_server_info) is
+// re-read; it is static apart from model swaps and sleep transitions.
 const propsInterval = 10 * time.Second
 
 // HistorySize is the number of samples retained for sparklines.
 const HistorySize = 240
 
-// Collector polls one llama.cpp server and maintains derived state.
+// Collector polls one inference server and maintains derived state.
 type Collector struct {
 	client *llama.Client
 	gpus   *gpu.Multi
@@ -33,6 +34,7 @@ type Collector struct {
 	model    llama.Model
 	propsAt  time.Time
 	startAt  time.Time
+	engine   llama.Engine
 
 	lastModel           string
 	modelUnmatched      bool
@@ -72,9 +74,9 @@ func (c *Collector) Uptime() time.Duration { return time.Since(c.startAt) }
 
 // ResetStats rebases the totals onto the current counter values.
 //
-// llama.cpp offers no way to zero its own counters, so ltop records where they
-// stand and reports the difference from here on, letting a single workload be
-// measured without restarting the server.
+// Neither llama.cpp nor SGLang offers a way to zero its own counters, so ltop
+// records where they stand and reports the difference from here on, letting a
+// single workload be measured without restarting the server.
 func (c *Collector) ResetStats() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -108,7 +110,7 @@ func (c *Collector) Poll(ctx context.Context) Snapshot {
 	snap := Snapshot{At: start}
 
 	// Host and GPU are sampled regardless of server reachability so the
-	// dashboard stays useful while llama.cpp is restarting.
+	// dashboard stays useful while the inference server is restarting.
 	snap.Host = c.hostS.Sample()
 	snap.GPUs = c.gpus.Sample(ctx)
 	c.accumulateEnergy(&snap, start)
@@ -123,9 +125,16 @@ func (c *Collector) Poll(ctx context.Context) Snapshot {
 	snap.Online = true
 	snap.Loading = health.Loading()
 
-	var absolute llama.Metrics
-	if set, err := c.client.Metrics(ctx); err == nil {
-		absolute = llama.ParseMetrics(set)
+	var (
+		absolute llama.Metrics
+		set      promparse.Set
+	)
+	if scraped, err := c.client.Metrics(ctx); err == nil {
+		set = scraped
+		if c.engine == llama.EngineUnknown {
+			c.engine = llama.DetectEngine(set)
+		}
+		absolute = llama.ParseMetricsFor(c.engine, set)
 		snap.Raw = absolute
 		snap.HasMetrics = true
 		if c.baselineSet {
@@ -142,13 +151,19 @@ func (c *Collector) Poll(ctx context.Context) Snapshot {
 	snap.Model = c.model
 	snap.ModelUnmatched = c.modelUnmatched
 
-	if slots, err := c.client.Slots(ctx); err == nil {
-		snap.Slots = slots
-		snap.HasSlots = true
-	} else if !errors.Is(err, llama.ErrEndpointDisabled) {
-		snap.Err = err
+	if c.engine.Is(llama.EngineSGLang) {
+		if set != nil {
+			snap.ContextPressure = llama.SGLangTokenUsage(set)
+		}
+	} else {
+		if slots, err := c.client.Slots(ctx); err == nil {
+			snap.Slots = slots
+			snap.HasSlots = true
+		} else if !errors.Is(err, llama.ErrEndpointDisabled) {
+			snap.Err = err
+		}
+		snap.ContextPressure = contextPressure(snap.Slots)
 	}
-	snap.ContextPressure = contextPressure(snap.Slots)
 
 	if snap.HasMetrics {
 		c.deriveRates(&snap, start, absolute)
@@ -164,13 +179,16 @@ func (c *Collector) Poll(ctx context.Context) Snapshot {
 	return snap
 }
 
-// deriveRates computes the live decode-step rate and, when llama.cpp publishes
-// fresh token counters, the exact measured throughput.
+// deriveRates computes the live decode-step rate and measured throughput.
 //
 // llama.cpp only folds a request's token and time totals into /metrics once the
 // request finishes. Between completions those counters are frozen, so the
 // measured tok/s is carried forward with an age rather than falling to zero,
 // and n_decode_total supplies the live activity signal in the meantime.
+//
+// SGLang has no busy-second counters. It advances realtime_tokens_total during
+// generation (mapped onto DecodeTotal) and exposes gen_throughput as a gauge;
+// when token counters move, rates are taken against wall time instead.
 func (c *Collector) deriveRates(snap *Snapshot, now time.Time, cur llama.Metrics) {
 	if !c.havePrev {
 		return
@@ -195,20 +213,45 @@ func (c *Collector) deriveRates(snap *Snapshot, now time.Time, cur llama.Metrics
 		snap.DecodeStepsPerSec = steps / wall
 	}
 
-	// Dividing tokens by the server's own busy seconds rather than by wall time
-	// yields the rate achieved while generating, matching llama.cpp's timings.
 	decodeTokens := cur.PredictedTokensTotal - c.prev.PredictedTokensTotal
 	decodeSecs := cur.PredictedSecondsTotal - c.prev.PredictedSecondsTotal
-	if decodeTokens > 0 && decodeSecs > 0 {
+	prefillTokens := cur.PromptTokensTotal - c.prev.PromptTokensTotal
+	prefillSecs := cur.PromptSecondsTotal - c.prev.PromptSecondsTotal
+
+	switch {
+	case decodeTokens > 0 && decodeSecs > 0:
+		// Dividing tokens by the server's own busy seconds rather than by wall
+		// time yields the rate achieved while generating (llama.cpp).
 		c.lastDecodeRate = decodeTokens / decodeSecs
+		c.lastDecodeAt = now
+		snap.Generating = true
+	case decodeTokens > 0:
+		c.lastDecodeRate = decodeTokens / wall
+		c.lastDecodeAt = now
+		snap.Generating = true
+	case cur.AvgPredictedTokensPerSec > 0 && c.engine.Is(llama.EngineSGLang):
+		// SGLang's gen_throughput gauge is live while decoding; use it when
+		// the cumulative generation counter has not yet moved this interval.
+		c.lastDecodeRate = cur.AvgPredictedTokensPerSec
+		c.lastDecodeAt = now
+		snap.Generating = true
+		if snap.DecodeStepsPerSec == 0 {
+			snap.DecodeStepsPerSec = cur.AvgPredictedTokensPerSec
+		}
+	case cur.DecodeTotal > c.prev.DecodeTotal && c.engine.Is(llama.EngineSGLang):
+		// realtime decode tokens advanced; treat the wall rate as measured
+		// throughput when generation_tokens_total is still catching up.
+		c.lastDecodeRate = (cur.DecodeTotal - c.prev.DecodeTotal) / wall
 		c.lastDecodeAt = now
 		snap.Generating = true
 	}
 
-	prefillTokens := cur.PromptTokensTotal - c.prev.PromptTokensTotal
-	prefillSecs := cur.PromptSecondsTotal - c.prev.PromptSecondsTotal
-	if prefillTokens > 0 && prefillSecs > 0 {
+	switch {
+	case prefillTokens > 0 && prefillSecs > 0:
 		c.lastPrefillRate = prefillTokens / prefillSecs
+		c.lastPrefillAt = now
+	case prefillTokens > 0:
+		c.lastPrefillRate = prefillTokens / wall
 		c.lastPrefillAt = now
 	}
 
@@ -245,23 +288,78 @@ func (c *Collector) refreshProps(ctx context.Context, now time.Time, snap *Snaps
 	if !c.propsAt.IsZero() && now.Sub(c.propsAt) < propsInterval {
 		return
 	}
-	props, err := c.client.Props(ctx)
-	if err != nil {
+
+	props, model, unmatched, ok := c.loadServerIdentity(ctx)
+	if !ok {
 		return
 	}
 	c.propsAt = now
+	c.engine = props.EngineOr()
 
-	if c.lastModel != "" && props.ModelPath != c.lastModel {
+	if c.lastModel != "" && props.ModelPath != "" && props.ModelPath != c.lastModel {
 		snap.ModelChanged = true
 		c.reset()
 	}
-	c.lastModel = props.ModelPath
-	c.props = props
-
-	if models, err := c.client.Models(ctx); err == nil {
-		model, ok := llama.MatchModel(models, props)
-		c.model, c.modelUnmatched = model, !ok && len(models) > 0
+	if props.ModelPath != "" {
+		c.lastModel = props.ModelPath
 	}
+	c.props = props
+	c.model = model
+	c.modelUnmatched = unmatched
+}
+
+// loadServerIdentity reads llama.cpp /props or SGLang /get_server_info and
+// pairs it with /v1/models metadata when available.
+func (c *Collector) loadServerIdentity(ctx context.Context) (llama.Props, llama.Model, bool, bool) {
+	if props, err := c.client.Props(ctx); err == nil && props.ModelPath != "" {
+		props.Engine = llama.EngineLlama
+		var (
+			model     llama.Model
+			unmatched bool
+		)
+		if models, err := c.client.Models(ctx); err == nil {
+			var ok bool
+			model, ok = llama.MatchModel(models, props)
+			unmatched = !ok && len(models) > 0
+		}
+		return props, model, unmatched, true
+	}
+
+	if info, err := c.client.ServerInfo(ctx); err == nil && (info.ModelPath != "" || info.ServedModelName != "") {
+		props := llama.PropsFromServerInfo(info)
+		model := llama.ModelFromServerInfo(info)
+		if models, err := c.client.Models(ctx); err == nil {
+			if matched, ok := llama.MatchModel(models, props); ok {
+				// Prefer OpenAI id when present; keep context from server info.
+				if matched.ID != "" {
+					model.ID = matched.ID
+				}
+				if matched.Meta.NCtx > 0 {
+					model.Meta.NCtx = matched.Meta.NCtx
+				}
+				if matched.Meta.NCtxTrain > 0 {
+					model.Meta.NCtxTrain = matched.Meta.NCtxTrain
+				} else if model.Meta.NCtxTrain == 0 {
+					model.Meta.NCtxTrain = model.Meta.NCtx
+				}
+				if matched.Meta.FType != "" {
+					model.Meta.FType = matched.Meta.FType
+				}
+				if matched.Meta.NParams > 0 {
+					model.Meta.NParams = matched.Meta.NParams
+				}
+				if matched.Meta.Size > 0 {
+					model.Meta.Size = matched.Meta.Size
+				}
+			}
+		}
+		return props, model, false, true
+	}
+
+	if c.engine.Is(llama.EngineSGLang) && c.props.Engine.Is(llama.EngineSGLang) {
+		return c.props, c.model, c.modelUnmatched, true
+	}
+	return llama.Props{}, llama.Model{}, false, false
 }
 
 // counterWentBackwards detects a server restart, which resets all counters.

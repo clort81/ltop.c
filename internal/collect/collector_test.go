@@ -14,17 +14,20 @@ import (
 	"github.com/pefman/ltop/internal/llama"
 )
 
-// fakeServer serves the llama.cpp endpoints ltop reads, with counters the test
-// controls.
+// fakeServer serves the llama.cpp / SGLang endpoints ltop reads, with counters
+// the test controls.
 type fakeServer struct {
 	*httptest.Server
-	metrics    string
-	slots      []llama.Slot
-	modelPath  string
-	noMetrics  bool
-	noSlots    bool
-	unhealthy  bool
-	requireKey string
+	metrics     string
+	slots       []llama.Slot
+	modelPath   string
+	noMetrics   bool
+	noSlots     bool
+	unhealthy   bool
+	requireKey  string
+	sglang      bool
+	serverInfo  string
+	healthBody  string
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -51,6 +54,10 @@ func newFakeServer(t *testing.T) *fakeServer {
 			http.Error(w, `{"status":"loading model"}`, http.StatusServiceUnavailable)
 			return
 		}
+		if f.healthBody != "" {
+			fmt.Fprint(w, f.healthBody)
+			return
+		}
 		fmt.Fprint(w, `{"status":"ok"}`)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -67,13 +74,32 @@ func newFakeServer(t *testing.T) *fakeServer {
 		if !auth(w, r) {
 			return
 		}
+		if f.sglang {
+			http.Error(w, `{"detail":"Not Found"}`, http.StatusNotFound)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(llama.Props{ModelPath: f.modelPath, BuildInfo: "test"})
+	})
+	mux.HandleFunc("/get_server_info", func(w http.ResponseWriter, r *http.Request) {
+		if !auth(w, r) {
+			return
+		}
+		if !f.sglang {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if f.serverInfo != "" {
+			fmt.Fprint(w, f.serverInfo)
+			return
+		}
+		fmt.Fprintf(w, `{"model_path":%q,"served_model_name":%q,"version":"0.5.17","context_length":32768,"enable_metrics":true,"max_running_requests":1}`,
+			f.modelPath, f.modelPath)
 	})
 	mux.HandleFunc("/slots", func(w http.ResponseWriter, r *http.Request) {
 		if !auth(w, r) {
 			return
 		}
-		if f.noSlots {
+		if f.noSlots || f.sglang {
 			http.Error(w, "disabled", http.StatusNotImplemented)
 			return
 		}
@@ -81,6 +107,10 @@ func newFakeServer(t *testing.T) *fakeServer {
 	})
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		if !auth(w, r) {
+			return
+		}
+		if f.sglang {
+			fmt.Fprintf(w, `{"data":[{"id":%q,"max_model_len":32768}]}`, f.modelPath)
 			return
 		}
 		fmt.Fprint(w, `{"data":[{"id":"m","meta":{"n_ctx":4096}}]}`)
@@ -521,5 +551,96 @@ func TestServerRestartClearsBaseline(t *testing.T) {
 	if snap.Raw.PredictedTokensTotal != 40 {
 		t.Errorf("generated = %v, want the absolute 40 after baseline was dropped",
 			snap.Raw.PredictedTokensTotal)
+	}
+}
+
+func TestSGLangPollMapsMetricsAndIdentity(t *testing.T) {
+	f := newFakeServer(t)
+	f.sglang = true
+	f.healthBody = ""
+	f.modelPath = "RadixArk/Qwen3.8-27B-NVFP4"
+	f.metrics = `
+sglang:prompt_tokens_total{model_name="m"} 100
+sglang:generation_tokens_total{model_name="m"} 50
+sglang:cached_tokens_total{cache_source="device",model_name="m"} 200
+sglang:realtime_tokens_total{mode="decode",model_name="m"} 40
+sglang:num_running_reqs{model_name="m"} 1
+sglang:num_queue_reqs{model_name="m"} 2
+sglang:token_usage{model_name="m"} 0.25
+sglang:spec_verify_calls_total{model_name="m"} 10
+sglang:spec_accept_rate{model_name="m"} 0.8
+sglang:spec_accept_length{model_name="m"} 3
+sglang:gen_throughput{model_name="m"} 12
+`
+
+	c := New(f.URL, "")
+	ctx := context.Background()
+	snap := c.Poll(ctx)
+
+	if !snap.Online {
+		t.Fatalf("offline: %v", snap.Err)
+	}
+	if !snap.HasMetrics {
+		t.Fatal("HasMetrics = false")
+	}
+	if snap.HasSlots {
+		t.Error("HasSlots = true for SGLang")
+	}
+	if snap.Props.Engine != llama.EngineSGLang {
+		t.Errorf("Engine = %q, want sglang", snap.Props.Engine)
+	}
+	if got := snap.Props.ModelName(); got != "Qwen3.8-27B-NVFP4" {
+		t.Errorf("ModelName = %q", got)
+	}
+	if snap.Model.Meta.NCtx != 32768 {
+		t.Errorf("NCtx = %d, want 32768", snap.Model.Meta.NCtx)
+	}
+	if snap.ContextPressure != 0.25 {
+		t.Errorf("ContextPressure = %v, want 0.25", snap.ContextPressure)
+	}
+	if snap.Raw.PredictedTokensTotal != 50 || snap.Raw.PromptTokensTotal != 100 {
+		t.Errorf("tokens gen=%v prompt=%v", snap.Raw.PredictedTokensTotal, snap.Raw.PromptTokensTotal)
+	}
+	if !snap.Raw.SpecEnabled() {
+		t.Error("SpecEnabled = false")
+	}
+
+	// Second poll: realtime decode advances → live rate.
+	f.metrics = `
+sglang:prompt_tokens_total{model_name="m"} 150
+sglang:generation_tokens_total{model_name="m"} 80
+sglang:cached_tokens_total{cache_source="device",model_name="m"} 220
+sglang:realtime_tokens_total{mode="decode",model_name="m"} 70
+sglang:num_running_reqs{model_name="m"} 1
+sglang:num_queue_reqs{model_name="m"} 0
+sglang:token_usage{model_name="m"} 0.4
+sglang:spec_verify_calls_total{model_name="m"} 12
+sglang:spec_accept_rate{model_name="m"} 0.8
+sglang:spec_accept_length{model_name="m"} 3
+sglang:gen_throughput{model_name="m"} 30
+`
+	time.Sleep(20 * time.Millisecond)
+	snap = c.Poll(ctx)
+	if snap.DecodeStepsPerSec <= 0 {
+		t.Errorf("DecodeStepsPerSec = %v, want live decode activity", snap.DecodeStepsPerSec)
+	}
+	if !snap.HasDecodeMeasured || snap.DecodeTokensPerSec <= 0 {
+		t.Errorf("decode measured=%v rate=%v", snap.HasDecodeMeasured, snap.DecodeTokensPerSec)
+	}
+	if !snap.HasPrefillMeasured || snap.PrefillTokensPerSec <= 0 {
+		t.Errorf("prefill measured=%v rate=%v", snap.HasPrefillMeasured, snap.PrefillTokensPerSec)
+	}
+}
+
+func TestSGLangEmptyHealthIsOnline(t *testing.T) {
+	f := newFakeServer(t)
+	f.sglang = true
+	f.healthBody = "   "
+	f.modelPath = "org/model"
+	f.metrics = "sglang:generation_tokens_total{model_name=\"m\"} 1\n"
+
+	snap := New(f.URL, "").Poll(context.Background())
+	if !snap.Online {
+		t.Fatalf("empty health body should be online: %v", snap.Err)
 	}
 }

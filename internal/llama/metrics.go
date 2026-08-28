@@ -117,7 +117,9 @@ func acceptedPerPos(set promparse.Set) []float64 {
 }
 
 // SpecEnabled reports whether the server produced speculative decoding counters.
-func (m Metrics) SpecEnabled() bool { return m.SpecDraftTokensTotal > 0 }
+func (m Metrics) SpecEnabled() bool {
+	return m.SpecDraftTokensTotal > 0 || m.SpecDraftsTotal > 0 || m.SpecAcceptedTokensTotal > 0
+}
 
 // SpecAcceptanceRate is the lifetime share of draft tokens the target model
 // accepted, in 0..1. Below roughly 0.4 the draft model usually costs more than

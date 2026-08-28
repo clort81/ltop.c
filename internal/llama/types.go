@@ -22,7 +22,11 @@ func (h Health) Loading() bool { return strings.EqualFold(h.Status, statusLoadin
 
 // Props is the subset of /props that ltop displays. llama.cpp returns a large
 // document including the full chat template; unused fields are dropped.
+// SGLang fills the same shape from /get_server_info so the UI stays shared.
 type Props struct {
+	// Engine is which inference server produced this telemetry. Empty means
+	// llama.cpp for backward compatibility with scrapes that predate the field.
+	Engine          Engine     `json:"-"`
 	ModelPath       string     `json:"model_path"`
 	BuildInfo       string     `json:"build_info"`
 	IsSleeping      bool       `json:"is_sleeping"`
@@ -39,13 +43,28 @@ type Modalities struct {
 	Audio  bool `json:"audio"`
 }
 
-// ModelName is the GGUF filename without directory or extension.
+// ModelName is the short model label for the header. For llama.cpp it is the
+// GGUF filename without directory or extension; for Hugging Face-style paths
+// (SGLang) it is the final path segment, left intact so dots in names like
+// Qwen3.8-27B are preserved.
 func (p Props) ModelName() string {
 	if p.ModelPath == "" {
 		return ""
 	}
+	lower := strings.ToLower(p.ModelPath)
+	if p.Engine.Is(EngineSGLang) || !strings.HasSuffix(lower, ".gguf") {
+		return ModelNameFromPath(p.ModelPath)
+	}
 	base := filepath.Base(p.ModelPath)
 	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+// EngineOr returns p.Engine, defaulting to llama.cpp when unset.
+func (p Props) EngineOr() Engine {
+	if p.Engine == EngineUnknown {
+		return EngineLlama
+	}
+	return p.Engine
 }
 
 // Slot is one entry of the /slots array: a server-side generation seat.
