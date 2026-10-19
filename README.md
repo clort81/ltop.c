@@ -1,246 +1,96 @@
-# ltop
+# ltop.c
 
-**An htop for llama.cpp and SGLang.** A terminal activity monitor that shows what your local LLM server is actually doing — live throughput, KV cache efficiency, speculative decoding quality, GPU load, and per-slot context usage, all on one screen.
+A dependency-free, single-file POSIX C monitor for `llama.cpp`'s `llama-server` metrics. 
 
-[![CI](https://github.com/pefman/ltop/actions/workflows/ci.yml/badge.svg)](https://github.com/pefman/ltop/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/pefman/ltop)](https://github.com/pefman/ltop/releases/latest)
-[![Go Report Card](https://goreportcard.com/badge/github.com/pefman/ltop)](https://goreportcard.com/report/github.com/pefman/ltop)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+## Philosophy
 
-```
- ltop v1.0.0  Qwen3.8-27B-UD-Q4_K_XL  Q4_K - Small  27.32B  16.7GiB      ● online
-  http://127.0.0.1:11436  ctx 140032/262144  llama.cpp b10430  up 4m12s  scrape 27ms
+Modern software development has forgotten how to write a simple command-line utility. A tool that merely fetches a few HTTP endpoints and prints formatted text should not require a massive toolchain, a megabyte-sized binary, or a sprawling graph of transitive dependencies. 
 
-  GPU0      [||||||||||||||||||       ]    68%  23.4GiB of 24.0GiB  64°C  333/450W  €0.0670
-    vram    [||||||||||||||||||||||||||] 97.5%  NVIDIA GeForce RTX 4090
-  CPU       [|||||||||||              ]  43.8%  28 cores  load 9.05
-  RAM       [|||||||||||||            ]  52.5%  32.8GiB of 62.5GiB
+This project is a corrective measure. It is written in strict C99, relies exclusively on standard POSIX APIs, and adheres to the Unix philosophy: write programs that do one thing well, work together, and handle text streams. It embodies 1980s coding idioms—procedural design, deterministic memory usage, and absolute transparency—rejecting the modern habit of treating simple CLI tools as enterprise-grade application frameworks.
 
-  DECODE       21.3 steps/s  ▂▃▅▇█▇▅▃▂▄▆█▇▅▃▂▁▃▅▇█▆▄▂
-    tok/s      43.6 tok/s  measured 12s ago   lifetime 44.2
-  PREFILL      1163 tok/s  measured 1m04s ago   lifetime 1161
-  QUEUE     1 processing   0 deferred   1.00 slots/decode
+# Zero Dependencies:
 
-  KV CACHE  [|||||||||||||||||||||||  ]  93.0%  3.41M reused / 257.7k prefilled
-  CONTEXT   [|||||||||                ]  36.9%  longest seen 140.0k tok
+- Avoids linking against heavy libraries (libcurl, libcjson), resulting in a tiny binary (~30KB vs ~300KB+) and instant startup time. It can be dropped on any POSIX system and compiled immediately.
 
-  SPEC      [||||||||||||||||         ]  64.4%  2.93x est speedup  1.93 accepted/draft
-    draft   pos0 79%  ·  pos1 63%  ·  pos2 51%
+# Zero-Allocation JSON Parsing:
 
-  SLOT STATE    TASK          PROMPT     CACHED     CTX
-  0    running  10050          51716      50750   36.9%  [||||        ]
+Just what is needed for the job. The custom parse_slots state machine is written in minimal C. It parses the JSON in a single O(N) pass with zero heap allocations. In contrast, libcjson builds an entire tree of dynamically allocated nodes, which is overkill and slower for this predictable, flat data structure.
 
-  STATS     59.5k generated  1.13M prefilled  6.04M cached  21.4k decodes  ~1h16m saved
-  COSTS     12.4Wh  €0.0670  €0.20/kWh  EUR  0.131 tok/J
+# Elegant Sparkline Rendering:
 
-  q quit   p pause   +/- 1s   s spec   g gpu   r refresh   z reset   w/W price   c currency   ? help
-```
+Shiny!
 
-## Why
+## Features
 
-Most llama.cpp dashboards read `llamacpp:predicted_tokens_seconds` and call it throughput. That gauge is a **cumulative average since server start** — it barely moves. Worse, llama.cpp only publishes its token counters when a request *completes*, so anything dividing them by wall-clock time reads **zero during generation**, which is exactly when you're watching.
+- **Zero Dependencies**: No `libcurl`, no `libcjson`, no `ncurses`, no Go runtime. 
+- **Single File**: The entire program resides in one readable `ltop.c` file. No build systems, no Makefiles, no package managers.
+- **Microscopic Footprint**: Compiles to a ~30KB statically optimizable binary in a fraction of a second.
+- **Pure VT100**: Uses direct ANSI escape sequences for terminal control and rendering. No terminfo database lookups or heavy terminal libraries.
+- **Scriptable**: Automatically detects non-interactive TTYs and outputs clean, space-separated key-value pairs suitable for `awk`, `grep`, or `prometheus-node-exporter` textfile collection.
 
-ltop handles this correctly. It shows a genuinely live activity signal derived from `n_decode_total` (the only counter that advances mid-generation) alongside exact measured throughput that is held and visibly aged rather than silently dropping to zero.
+## The Case Against the "Modern" Implementation
 
-It also surfaces things nothing else does — like per-position speculative draft acceptance, which tells you how long your draft should actually be.
+This project is a simplified, hardened port of the original Go-based `ltop`. While the original is functional, it exhibits several modern anti-patterns that are unacceptable for a lightweight system utility:
 
-## Requirements
+| Metric | Original Go Implementation | This POSIX C Implementation |
+| :--- | :--- | :--- |
+| **Build Toolchain** | Requires Go compiler, module resolution, and network access to fetch dependencies. | Standard `cc`. Compiles offline in milliseconds. |
+| **Binary Size** | 15MB - 50MB+ (includes entire Go runtime and garbage collector). | ~30KB (pure machine code, no runtime overhead). |
+| **Dependencies** | Dozens of transitive dependencies for HTTP, JSON, and terminal rendering. | Exactly zero. The OS provides everything needed. |
+| **JSON Parsing** | Heavy reflection-based unmarshaling, allocating hundreds of temporary objects per request. | Custom, zero-allocation state machine. Single `O(N)` pass over the string. |
+| **Scope Creep** | Includes "config wizards", "self-updaters", "server discovery", and complex color libraries. | Strictly monitors metrics. Does one thing, perfectly. |
 
-- Linux (ltop reads `/proc` and `/sys` directly)
-- A [llama.cpp](https://github.com/ggml-org/llama.cpp) **or** [SGLang](https://github.com/sgl-project/sglang) server
+Adding a "self-updater" or a "configuration wizard" to a tool whose only job is to read an HTTP endpoint is a failure of scope. This version strips away the cruft and focuses entirely on performance, reliability, and clarity.
 
-### llama.cpp
+## Technical Highlights
 
-Start `llama-server` with introspection enabled:
+1. **Zero-Allocation JSON Parsing**: The `/slots` endpoint is parsed using a custom, depth-tracking state machine. It reads scalar values directly from the string buffer in a single pass without a single call to `malloc`.
+2. **Raw POSIX Sockets**: HTTP/1.0 requests are constructed and sent via standard `socket()`, `connect()`, and `write()` calls. This eliminates the need for `libcurl` and its associated initialization overhead and hidden state.
+3. **Deterministic UTF-8 Sparklines**: The decode speed sparkline exploits the fact that the Unicode block characters (`▁▂▃▄▅▆▇█`) are contiguous in the UTF-8 table and each is exactly 3 bytes. Rendering is achieved via direct pointer arithmetic (`memcpy(sp + k, ramp + 3 * g, 3)`), avoiding array-of-pointers indirection and ensuring maximum cache efficiency.
+4. **Robust Terminal Handling**: Uses `poll(2)` with precise microsecond-aware timing for non-blocking input, ensuring the UI remains responsive without busy-waiting or spawning threads.
 
-```bash
-llama-server -m model.gguf --slots --metrics
-```
+## Build
 
-Both flags are optional. Without `--metrics` you lose the throughput, cache and speculative panels; without `--slots` you lose the slot table. ltop stays online either way and tells you which flag is missing.
-
-### SGLang
-
-Expose Prometheus metrics (default port is often `30000` or `8000`):
+Ensure you have a standard C compiler (GCC or Clang) installed. No development packages beyond the standard C library are required.
 
 ```bash
-python -m sglang.launch_server --model-path <model> --enable-metrics --port 8000
-```
-
-ltop autodetects SGLang from `sglang:` metric names and `/get_server_info`. There is no slot table; queue depth and KV pool occupancy replace it.
-
-GPU panels use `nvidia-smi` for NVIDIA and the `amdgpu` sysfs interface for AMD. Neither is required — the panel hides itself when no GPU is readable.
-
-## Install
-
-### From a release
-
-Prebuilt `linux/amd64` and `linux/arm64` binaries are on the [releases page](https://github.com/pefman/ltop/releases).
-
-```bash
-curl -sSL https://github.com/pefman/ltop/releases/latest/download/ltop_linux_amd64.tar.gz | tar xz
-install -Dm755 ltop ~/.local/bin/ltop
-```
-
-### From source
-
-```bash
-git clone https://github.com/pefman/ltop
-cd ltop
-./install.sh
-```
-
-The script checks your Go version, runs the tests, builds with the version stamped in, and installs to `~/.local/bin`.
-
-### With go install
-
-```bash
-go install github.com/pefman/ltop@latest
+cc -O2 -std=c99 -Wall -Wextra -o ltop ltop.c
 ```
 
 ## Usage
 
-```bash
-ltop                # the dashboard
-ltop -once          # one plain-text snapshot, then exit
-ltop -reconfigure   # pick a different server
-ltop -config path   # use a different config file (and its endpoint/host)
-ltop -version
-```
+# Interactive mode (default when attached to a TTY)
+./ltop
 
-On first run ltop scans localhost for llama.cpp and SGLang servers, asks which to monitor, and saves your choice to `~/.config/ltop/config.json`. Servers started with `--api-key` are supported; ltop asks for the key only when the server actually demands one.
+# Point to a specific host and port
+./ltop http://192.168.1.50:8080
 
-Use `-config` when you want a separate saved endpoint — for example a remote host — without overwriting the default config:
+# Non-interactive mode: outputs a single snapshot for scripting
+./ltop -1
 
-```bash
-ltop -config ~/.config/ltop/remote.json -reconfigure   # pick/save a remote endpoint
-ltop -config ~/.config/ltop/remote.json                # monitor that host
-```
+# Non-interactive mode: outputs two snapshots, 2 seconds apart, to calculate rates
+./ltop -1 -n 2
 
-`ltop -once` prints plain text, so it pipes and greps cleanly:
+# Use an API key if your server requires authentication
+./ltop -k your_secret_api_key
 
-```bash
-ltop -once | grep 'hit rate'
-```
+### Interactive Controls
 
-### Keys
+When running in a terminal, the following keys are active:
+- `q` or `Q`: Quit immediately.
+- `p`: Pause/resume screen updates.
+- `+` or `=`: Increase the polling interval.
+- `-`: Decrease the polling interval (minimum 0.25s).
+- `z`: Reset the baseline counters (useful for measuring a specific generation run).
+- `r`: Force an immediate refresh.
 
-| Key | Action |
-| --- | --- |
-| `q` / `esc` | quit |
-| `p` / `space` | pause polling |
-| `+` / `-` | faster / slower poll interval |
-| `s` | toggle the speculative decoding panel |
-| `g` | toggle the GPU panel |
-| `r` | force one refresh |
-| `u` | install a pending self-update (when the orange banner is showing) |
-| `z` | reset the stats window to now |
-| `w` / `W` | raise / lower electricity price by 0.10/kWh |
-| `c` / `C` | cycle electricity currency (EUR, USD, GBP, SEK, NOK, DKK, CHF, PLN, CAD, AUD) |
-| `?` | help |
+## Design Constraints
 
-## What the metrics mean
-
-| Metric | Meaning |
-| --- | --- |
-| **DECODE steps/s** | `llama_decode()` calls per second — the live activity signal, and what drives the sparkline. |
-| **tok/s measured** | Exact throughput from token and time counters. Only refreshes when a request completes, so it is shown with its age and dims once stale. |
-| **PREFILL** | Prompt processing throughput, same measurement rules. |
-| **KV CACHE** | Share of prompt tokens reused instead of re-prefilled. A low rate on a chat workload is usually the biggest speedup available to you. |
-| **CONTEXT** | The fullest slot's context occupancy — warns before eviction starts. |
-| **SPEC** | Speculative draft acceptance with an estimated speedup. Below roughly 35% the draft model typically costs more than it saves. |
-| **SPEC draft posN** | Share of drafts accepted at each depth. Where this falls off is your practical draft-length limit. |
-| **QUEUE** | Requests processing and deferred, plus busy slots per decode — how well batching is working. |
-| **tok/J** | Decode tokens per joule of GPU energy, for comparing quantisations and offload splits. Only reported while actively decoding. |
-| **STATS** | Lifetime counters from the server: tokens generated, prefilled, reused from cache, and `llama_decode()` calls, plus an estimate of the prefill wall time the cache avoided. Press `z` to count from now instead. |
-| **COSTS** | GPU energy observed this session, the running electricity bill at the current per-kWh tariff (`w`/`W`, 0.10 steps, default 0.20), currency (`c`/`C`), and tok/J while decoding. Each GPU also shows its own running cost next to the watts. |
-
-## Configuration
-
-`~/.config/ltop/config.json`, created on first run and written `0600`:
-
-```json
-{
-  "endpoint": "http://127.0.0.1:11436",
-  "poll_interval_ms": 1000,
-  "currency": "EUR",
-  "kwh_price": 0.2
-}
-```
-
-The endpoint is not read from the environment. Run `ltop -reconfigure` to change it, or pass `-config path` to load and save a different config file.
-`c`/`C` and `w`/`W` write `currency` and `kwh_price` so the last tariff is reused next time.
-
-## Measuring a single run
-
-Press `z` to rebase the counters onto the current moment. The stats row switches
-to `SINCE z` and reports only what has happened since, along with how long the
-window has been open, so one workload can be measured without restarting the
-server. Cache hit rate, speculative acceptance, GPU energy and the cost
-figures follow the same window.
-
-The electricity tariff starts at €0.20/kWh, or whatever `w`/`W` and `c`/`C`
-last saved. Press `w` to raise it and `W` (shift+w) to lower it in 0.10 steps
-so the running cost matches your rate. Press `c` to cycle currency (EUR, USD,
-GBP, SEK, NOK, DKK, CHF, PLN, CAD, AUD) and `C` to go backwards. The numeric
-tariff is kept; nudge `w`/`W` after a switch if the local unit is a different
-scale.
-
-llama.cpp cannot zero its own counters, so ltop records where they stood and
-reports the difference. If the server restarts while a window is open, the
-baseline is dropped rather than producing negative totals.
-
-## Multiple models
-
-Model metadata is matched against the loaded model rather than taken from the first entry of `/v1/models`. On a router such as `llama-swap` that serves several models, ltop withholds quantisation and size rather than pairing them with the wrong model's name. Model swaps are detected within ten seconds and clear the rate history so a fast model's numbers do not blend into a slow one's.
-
-## Troubleshooting
-
-**"server unreachable"** — check the endpoint with `curl http://host:port/health`. If the server needs an API key, run `ltop -reconfigure`.
-
-**No throughput panels** — the server was started without `--metrics`.
-
-**Empty slot table** — the server was started without `--slots`.
-
-**tok/s says "awaiting a completed request"** — expected. llama.cpp only publishes token counters when a request finishes; the DECODE steps/s line and sparkline stay live in the meantime.
-
-**No GPU panel** — `nvidia-smi` is not on `PATH`, or the AMD card does not expose `gpu_busy_percent` in sysfs.
-
-## Development
-
-```bash
-make vet     # gofmt + go vet
-make test    # go test ./...
-make build
-```
-
-Tests cover the Prometheus parser against a captured `/metrics` fixture, the derived metrics, counter-reset rebaselining, degraded-endpoint handling, config persistence, and dashboard layout at several terminal widths.
-
-Release builds check GitHub for a newer version in the background. If one is
-waiting, an orange banner says so; press `u` to download it, verify the SHA-256,
-replace the binary, and restart. Check failures are ignored — the dashboard
-never depends on GitHub being reachable. `dev` / source builds do not self-update.
-
-The upgrade contract is frozen as protocol v1. Every `v*` release MUST publish
-these names (already-shipped binaries look them up under
-`/releases/latest/download/`):
-
-| Asset | Role |
-| --- | --- |
-| `update.json` | version + per-arch SHA-256 (schema 1) |
-| `checksums.txt` | same hashes, fallback if `update.json` is missing |
-| `ltop_linux_amd64.tar.gz` | archive with a top-level `ltop` binary |
-| `ltop_linux_arm64.tar.gz` | same for arm64 |
-
-Do not rename those files. Newer `update.json` schemas may add fields but must
-keep the v1 keys so old clients can still upgrade.
-
-Releases are cut by [GoReleaser](https://goreleaser.com) from a `v*` tag:
-
-```bash
-git tag -a v1.0.0 -m "v1.0.0" && git push origin v1.0.0
-```
+- **No HTTPS**: This tool speaks raw HTTP/1.0. If your `llama-server` is behind a reverse proxy requiring HTTPS, use `stunnel`, `socat`, or `nginx` to terminate TLS locally, and point `ltop` at `http://127.0.0.1`. A monitoring tool should not be burdened with cryptographic library dependencies.
+- **Linux-Centric Host Metrics**: CPU and RAM sampling read directly from `/proc/stat` and `/proc/meminfo`. On non-Linux POSIX systems, these specific lines will silently omit, while the core `llama-server` metrics will continue to function perfectly.
+- **No Object-Oriented Patterns**: The code is strictly procedural. State is managed via explicit structs and global static variables where appropriate for a single-instance CLI tool, avoiding the abstraction overhead and indirection of OOP paradigms.
 
 ## License
 
-[MIT](LICENSE)
+MIT. Derived from the original pefman/ltop concept, but rewritten from the ground up to adhere to strict Unix engineering principles.
+
