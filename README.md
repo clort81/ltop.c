@@ -6,7 +6,7 @@ A dependency-free, single-file POSIX C monitor for `llama.cpp`'s `llama-server` 
 
 ## Philosophy
 
-Modern software development has forgotten how to write a simple command-line utility. 
+Modern software development has forgotten how to write a simple command-line utility. This shows how.
 
 ## Features
 
