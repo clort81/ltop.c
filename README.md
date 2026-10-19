@@ -32,27 +32,22 @@ cc -O2 -std=c99 -Wall -Wextra -o ltop ltop.c
 ```
 ## Usage
 
-# Interactive mode (default when attached to a TTY)
 ```bash
 ./ltop
 ```
 
-# Point to a specific host and port
 ```bash
 ./ltop http://192.168.1.50:8080
 ```
 
-# Non-interactive mode: outputs a single snapshot for scripting
 ```bash
 ./ltop -1
 ```
 
-# Non-interactive mode: outputs two snapshots, 2 seconds apart, to calculate rates
 ```bash
 ./ltop -1 -n 2
 ```
 
-# Use an API key if your server requires authentication
 ```bash
 ./ltop -k your_secret_api_key
 ```
