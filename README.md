@@ -2,6 +2,8 @@
 
 A dependency-free, single-file POSIX C monitor for `llama.cpp`'s `llama-server` metrics. 
 
+![ltop.c](ltop.c.gif)
+
 ## Philosophy
 
 Modern software development has forgotten how to write a simple command-line utility. A tool that merely fetches a few HTTP endpoints and prints formatted text should not require a massive toolchain, a megabyte-sized binary, or a sprawling graph of transitive dependencies. 
