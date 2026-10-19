@@ -12,8 +12,8 @@ Modern software development has forgotten how to write a simple command-line uti
 
 - **Zero Dependencies**: No `libcurl`, no `libcjson`, no `ncurses`, no Go runtime. 
 - **Single File**: The entire program resides in one readable `ltop.c` file. No build systems, no Makefiles, no package managers.
-- **Microscopic Footprint**: Compiles to a ~30KB statically optimizable binary in a fraction of a second.
-- **Pure VT100**: Uses direct ANSI escape sequences for terminal control and rendering. No terminfo database lookups or heavy terminal libraries.
+- **Microscopic Footprint**: Compiles to a ~35KB statically optimizable binary.
+- **Pure VT100**: Uses direct ANSI escape sequences for terminal control. No terminfo database lookups or heavy terminal libraries. Because everything speaks these basic ANSI term controls since about 35 years. Ncurses was made to handle incompatible terminals that you can only find in museums.
 - **Scriptable**: Automatically detects non-interactive TTYs and outputs clean, space-separated key-value pairs suitable for `awk`, `grep`, or `prometheus-node-exporter` textfile collection.
 
 
